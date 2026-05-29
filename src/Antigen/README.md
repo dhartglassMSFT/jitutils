@@ -1,3 +1,5 @@
+This directory contains a fork of [kunalspathak/Antigen](https://github.com/kunalspathak/Antigen), imported via `git subtree` from commit `69d2547f91a233e6002001e5ca149e8661a4716a` on 2026-05-29.
+
 ## What is it?
 
 Antigen is a fuzzer that generates random C# programs on the fly to test [.NET's RyuJIT](https://github.com/Potapy4/dotnet-coreclr/blob/master/Documentation/botr/ryujit-overview.md).
