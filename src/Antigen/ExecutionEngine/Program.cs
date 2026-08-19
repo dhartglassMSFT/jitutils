@@ -82,7 +82,26 @@ namespace ExecutionEngine
         /// <param name="assemblyBytes"></param>
         /// <param name="error"></param>
         /// <returns></returns>
+        // Generated test code can be arbitrarily deep (nested loops/ifs, recursive method
+        // calls, deep expression trees), and can easily overflow the host process's default
+        // thread stack. A StackOverflowException is fatal and un-catchable on every OS/runtime,
+        // so we must not let generated code run on the process's default thread: doing so takes
+        // the entire ExecutionEngine host down silently, breaking Antigen's stdin/stdout pipe to
+        // it and (on Linux/macOS in particular) ending the whole fuzzing session almost
+        // immediately. Fuzzlyn avoids this by running all generated code on a dedicated
+        // large-stack thread (see Fuzzlyn.ExecutionServer/Program.cs); do the same here.
+        private const int GeneratedCodeStackSizeBytes = 64 * 1024 * 1024;
+
         private static RunResult Run(byte[] assemblyBytes)
+        {
+            RunResult result = default;
+            Thread runnerThread = new(() => result = RunOnCurrentThread(assemblyBytes), GeneratedCodeStackSizeBytes);
+            runnerThread.Start();
+            runnerThread.Join();
+            return result;
+        }
+
+        private static RunResult RunOnCurrentThread(byte[] assemblyBytes)
         {
             int hashCode;
             var assembly = s_loader.LoadFromBytes(assemblyBytes);
