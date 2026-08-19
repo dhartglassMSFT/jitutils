@@ -75,7 +75,26 @@ using System.Numerics;
 
                 staticMethodBuilder.AppendLine("public static int Antigen() { ");
                 staticMethodBuilder.AppendLine($"new {MainClassName}().Method0();");
-                staticMethodBuilder.AppendLine("return string.Join(Environment.NewLine, toPrint).GetHashCode();");
+                staticMethodBuilder.AppendLine("return StableHash(string.Join(Environment.NewLine, toPrint));");
+                staticMethodBuilder.AppendLine("}");
+
+                // StableHash method.
+                // Deliberately not string.GetHashCode(): that is seeded per-process from
+                // Marvin.DefaultSeed (see runtime's String.Comparison.cs / Marvin.cs), so it
+                // returns a different value for identical output on every run, which makes
+                // saved repros unverifiable and breaks unique-issue bucketing across runs.
+                // This is FNV-1a 64 folded down to int, so it is reproducible everywhere.
+                // NoOptimization/NoInlining keep the checksum itself out of reach of the JIT
+                // stress modes under test; a miscompiled checksum would look like a test failure.
+                staticMethodBuilder.AppendLine("[MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]");
+                staticMethodBuilder.AppendLine("public static int StableHash(string s) {");
+                staticMethodBuilder.AppendLine("ulong h = 14695981039346656037UL;");
+                staticMethodBuilder.AppendLine("for (int i = 0; i < s.Length; i++) {");
+                staticMethodBuilder.AppendLine("char c = s[i];");
+                staticMethodBuilder.AppendLine("h ^= (byte)c; h *= 1099511628211UL;");
+                staticMethodBuilder.AppendLine("h ^= (byte)(c >> 8); h *= 1099511628211UL;");
+                staticMethodBuilder.AppendLine("}");
+                staticMethodBuilder.AppendLine("return (int)(h ^ (h >> 32));");
                 staticMethodBuilder.AppendLine("}");
 
                 // Log method
