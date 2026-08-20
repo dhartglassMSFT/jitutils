@@ -84,7 +84,9 @@ namespace Antigen
                 TestCase.s_Driver = EEDriver.GetInstance(s_runOptions.CoreRun, Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "ExecutionEngine.dll"), () => EnvVarOptions.TestVars(includeOsrSwitches: PRNG.Decide(0.3), false));
                 TestCase.s_TestRunner = TestRunner.GetInstance(TestCase.s_Driver, s_runOptions.CoreRun);
 
-                // Generate vector methods
+                // Generate vector methods. The flag must be set before recording, because the
+                // method pool is built once and reused for every test case.
+                VectorHelpers.AllowFloatToIntegralReinterpret = opts.AllowFloatToIntegralReinterpret;
                 VectorHelpers.RecordVectorMethods();
 
                 Parallel.For(0, 4, (p) => RunTest());
@@ -309,5 +311,8 @@ namespace Antigen
 
         [Option(shortName: 'd', longName: "RunDuration", Required = false, HelpText = "Duration in minutes to run. By default until NumTestCases, but if Duration is given, will override the NumTestCases.")]
         public int RunDuration { get; set; }
+
+        [Option(longName: "AllowFloatToIntegralReinterpret", Required = false, Default = false, HelpText = "Allow generating bitwise reinterpretations of floating-point vectors to integral ones (Vector128.AsInt32(), Vector.AsVectorUInt64(), ...). Off by default because the JIT may represent a NaN with different bit patterns in Debug and Release, so these produce output mismatches that are not real bugs.")]
+        public bool AllowFloatToIntegralReinterpret { get; set; }
     }
 }

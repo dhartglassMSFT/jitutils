@@ -118,6 +118,39 @@ namespace Antigen.Tree
             return false;
         }
 
+        /// <summary>
+        ///     Returns true if this vector type has a floating-point (float/double) element type.
+        ///     Relevant because AllBitsSet on such a type is a NaN, and the JIT is free to use any
+        ///     bitwise representation for a NaN.
+        /// </summary>
+        public bool HasFloatingPointElement()
+        {
+            if (!IsVectorType)
+            {
+                return false;
+            }
+
+            switch (VectorType)
+            {
+                case VectorType.Vector64_Float:
+                case VectorType.Vector64_Double:
+                case VectorType.Vector128_Float:
+                case VectorType.Vector128_Double:
+                case VectorType.Vector256_Float:
+                case VectorType.Vector256_Double:
+                case VectorType.Vector512_Float:
+                case VectorType.Vector512_Double:
+                case VectorType.Vector_Float:
+                case VectorType.Vector_Double:
+                case VectorType.Vector2:
+                case VectorType.Vector3:
+                case VectorType.Vector4:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         public bool IsVectorTIntrinsics()
         {
             if (IsVectorType)

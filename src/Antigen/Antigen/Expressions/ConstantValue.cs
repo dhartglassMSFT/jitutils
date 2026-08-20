@@ -20,6 +20,22 @@ namespace Antigen.Expressions
             { "Vector4", new List<string>() { "One", "Zero", "UnitW", "UnitX", "UnitY", "UnitZ" } },
         };
 
+        // AllBitsSet on a floating-point element type is a NaN (every bit set). NaN is absorbing:
+        // it propagates through arithmetic, so seeding a computation with one collapses everything
+        // downstream to NaN and the generated test stops discriminating between a correct and an
+        // incorrect JIT. Measured over a 6-step op chain, a NaN seed produces 1 distinct state out
+        // of 6, versus 5 of 6 for One/Indices. It is also what makes Debug/Release NaN
+        // representation differences observable at all. So keep generating it, but rarely.
+        //
+        // Integral element types are unaffected: there AllBitsSet is -1 / MaxValue, which is a
+        // valuable fuzzing input, so they retain the original rate.
+        private const double FloatingPointAllBitsSetProbability = 0.05;
+        private const double IntegralAllBitsSetProbability = 0.5;
+
+        // Constants that are well-defined and non-absorbing for every element type and every
+        // vector width. All are available in net9.0 and later.
+        private static readonly List<string> s_nonAbsorbingVectorConstants = new List<string>() { "Zero", "One", "Indices" };
+
         protected ConstantValue(Tree.ValueType valueType, string value) : base(null)
         {
             if (valueType.PrimitiveType == Primitive.Char)
@@ -87,7 +103,13 @@ namespace Antigen.Expressions
                 }
                 else
                 {
-                    constantValue += (PRNG.Decide(0.5) ? ".AllBitsSet" : ".Zero");
+                    double allBitsSetProbability = literalType.HasFloatingPointElement()
+                        ? FloatingPointAllBitsSetProbability
+                        : IntegralAllBitsSetProbability;
+
+                    constantValue += PRNG.Decide(allBitsSetProbability)
+                        ? ".AllBitsSet"
+                        : ("." + s_nonAbsorbingVectorConstants[PRNG.Next(s_nonAbsorbingVectorConstants.Count)]);
                 }
             }
             else if ((literalType.PrimitiveType & Primitive.Numeric) != 0)

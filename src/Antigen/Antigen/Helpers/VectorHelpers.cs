@@ -24,6 +24,15 @@ namespace Antigen
         private static List<MethodSignature> s_allVectorMethods = null;
         private static List<ValueType> s_allVectorTypes = null;
 
+        /// <summary>
+        ///     When false (the default), methods that reinterpret a floating-point element vector
+        ///     as an integral element vector (Vector128.AsInt32(), Vector.AsVectorUInt64(), ...) are
+        ///     kept out of the method pool. See <see cref="IsFloatToIntegralReinterpretation"/>.
+        ///     Set from the --AllowFloatToIntegralReinterpret command line switch, and must be
+        ///     assigned before <see cref="RecordVectorMethods"/> runs.
+        /// </summary>
+        public static bool AllowFloatToIntegralReinterpret = false;
+
         public static List<MethodSignature> GetAllVectorMethods()
         {
             Debug.Assert(s_allVectorMethods != null);
@@ -205,6 +214,65 @@ namespace Antigen
         }
 
         /// <summary>
+        ///     Returns true if <paramref name="method"/> bitwise-reinterprets a vector with a
+        ///     floating-point element type as a vector with an integral element type - for example
+        ///     Vector128.AsInt32(Vector128&lt;float&gt;) or Vector.AsVectorUInt64(Vector&lt;double&gt;).
+        ///
+        ///     The JIT is allowed to pick any bitwise representation for a NaN, so long as the value
+        ///     is a NaN. Antigen generates float NaNs readily (Vector128&lt;float&gt;.AllBitsSet is one),
+        ///     and while a NaN prints as "NaN" no matter how it is encoded, reinterpreting one to an
+        ///     integral element type exposes the raw bits. That turns a legal Debug/Release
+        ///     representation difference into an OutputMismatch that is not a real bug, and those
+        ///     have dominated the reported divergences. Note that only this direction leaks:
+        ///     integral -&gt; floating-point is fine.
+        /// </summary>
+        private static bool IsFloatToIntegralReinterpretation(MethodInfo method)
+        {
+            if (!method.Name.StartsWith("As", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var parameters = method.GetParameters();
+            if (parameters.Length != 1)
+            {
+                return false;
+            }
+
+            return IsFloatingPointElementVector(parameters[0].ParameterType) &&
+                   IsIntegralElementVector(method.ReturnType);
+        }
+
+        /// <summary>
+        ///     Returns the element type of a closed generic vector type, or null if the type is not
+        ///     one (Vector2/Vector3/Vector4 and open generics both return null).
+        /// </summary>
+        private static Type VectorElementType(Type type)
+        {
+            if (!type.IsGenericType || type.ContainsGenericParameters)
+            {
+                return null;
+            }
+
+            var genericArgs = type.GetGenericArguments();
+            return genericArgs.Length == 1 ? genericArgs[0] : null;
+        }
+
+        private static bool IsFloatingPointElementVector(Type type)
+        {
+            var elementType = VectorElementType(type);
+            return elementType == typeof(float) || elementType == typeof(double);
+        }
+
+        private static bool IsIntegralElementVector(Type type)
+        {
+            var elementType = VectorElementType(type);
+            return elementType != null && elementType.IsPrimitive &&
+                   elementType != typeof(float) && elementType != typeof(double) &&
+                   elementType != typeof(bool) && elementType != typeof(char);
+        }
+
+        /// <summary>
         ///     Record the vector methods as well as the ones that creates the Vector.
         ///     Applicable for Vector64, Vector128, Vector256, Vector512.
         /// </summary>
@@ -230,6 +298,11 @@ namespace Antigen
                 }
 
                 if (ShouldSkipVectorMethod(fullMethodName))
+                {
+                    continue;
+                }
+
+                if (!AllowFloatToIntegralReinterpret && IsFloatToIntegralReinterpretation(method))
                 {
                     continue;
                 }
@@ -267,6 +340,14 @@ namespace Antigen
                     foreach (var genericArgument in s_vectorGenericArgs)
                     {
                         var genericInitVectorMethod = method.MakeGenericMethod(genericArgument);
+
+                        // Checked on the instantiated method: the open generic's parameter type is
+                        // Vector128<T>, whose element type is not yet known to be floating-point.
+                        if (!AllowFloatToIntegralReinterpret && IsFloatToIntegralReinterpretation(genericInitVectorMethod))
+                        {
+                            continue;
+                        }
+
                         s_allVectorMethods.Add(CreateMethodSignature(vectorTypeName, genericInitVectorMethod));
                     }
                 }
