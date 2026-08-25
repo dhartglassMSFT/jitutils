@@ -35,15 +35,47 @@ namespace Antigen.Compilation
                 { "SYSLIB5003", ReportDiagnostic.Suppress }
             });
 
-        private static readonly string s_corelibPath = typeof(object).Assembly.Location;
-        private static readonly MetadataReference[] s_references =
-{
-             MetadataReference.CreateFromFile(s_corelibPath),
-             MetadataReference.CreateFromFile(Path.Combine(Path.GetDirectoryName(s_corelibPath), "System.Console.dll")),
-             MetadataReference.CreateFromFile(Path.Combine(Path.GetDirectoryName(s_corelibPath), "System.Runtime.dll")),
-             MetadataReference.CreateFromFile(typeof(SyntaxTree).Assembly.Location),
-             MetadataReference.CreateFromFile(typeof(CSharpSyntaxTree).Assembly.Location),
-        };
+        // Directory whose assemblies generated tests are compiled against. This must be
+        // CORE_ROOT, not Antigen's own directory: the tests execute under CORE_ROOT's corerun,
+        // so compiling against Antigen's (older, fixed at its TargetFramework) framework means
+        // APIs renamed since then compile fine but throw MissingMethodException at run time,
+        // and APIs added since then can never be generated at all. Falls back to Antigen's own
+        // framework if not set, which preserves the previous behavior.
+        private static string s_referenceDirectory = Path.GetDirectoryName(typeof(object).Assembly.Location);
+
+        private static readonly object s_referencesLock = new object();
+        private static MetadataReference[] s_references = null;
+
+        /// <summary>
+        ///     Point compilation at CORE_ROOT. Must be called before the first Compile().
+        /// </summary>
+        public static void SetReferenceDirectory(string referenceDirectory)
+        {
+            lock (s_referencesLock)
+            {
+                s_referenceDirectory = referenceDirectory;
+                s_references = null;
+            }
+        }
+
+        private static MetadataReference[] GetReferences()
+        {
+            lock (s_referencesLock)
+            {
+                if (s_references == null)
+                {
+                    s_references = new MetadataReference[]
+                    {
+                        MetadataReference.CreateFromFile(Path.Combine(s_referenceDirectory, "System.Private.CoreLib.dll")),
+                        MetadataReference.CreateFromFile(Path.Combine(s_referenceDirectory, "System.Console.dll")),
+                        MetadataReference.CreateFromFile(Path.Combine(s_referenceDirectory, "System.Runtime.dll")),
+                        MetadataReference.CreateFromFile(typeof(SyntaxTree).Assembly.Location),
+                        MetadataReference.CreateFromFile(typeof(CSharpSyntaxTree).Assembly.Location),
+                    };
+                }
+                return s_references;
+            }
+        }
 
         private readonly string m_outputDirectory;
 
@@ -66,7 +98,7 @@ namespace Antigen.Compilation
         private byte[] CompileAndGetBytes(SyntaxTree programTree, string assemblyName, CSharpCompilationOptions options)
         {
             string tag = options.OptimizationLevel == OptimizationLevel.Debug ? "Debug" : "Release";
-            var cc = CSharpCompilation.Create($"{assemblyName}-{tag}.exe", new SyntaxTree[] { programTree }, s_references, options);
+            var cc = CSharpCompilation.Create($"{assemblyName}-{tag}.exe", new SyntaxTree[] { programTree }, GetReferences(), options);
 
             using (var ms = new MemoryStream())
             {

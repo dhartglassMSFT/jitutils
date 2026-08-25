@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Reflection;
@@ -19,10 +20,23 @@ namespace Antigen
 {
     public class VectorHelpers
     {
-        private static readonly List<Type> s_vectorGenericArgs = new() { typeof(byte), typeof(sbyte), 
-            typeof(short), typeof(ushort), typeof(int), typeof(uint), typeof(long), typeof(ulong), typeof(float), typeof(double) };
+        private static readonly string[] s_vectorGenericArgNames = new[]
+        {
+            "System.Byte", "System.SByte", "System.Int16", "System.UInt16", "System.Int32",
+            "System.UInt32", "System.Int64", "System.UInt64", "System.Single", "System.Double"
+        };
+
+        private static List<Type> s_vectorGenericArgs = null;
         private static List<MethodSignature> s_allVectorMethods = null;
         private static List<ValueType> s_allVectorTypes = null;
+
+        // When set, the method pool is built by reading CORE_ROOT's assemblies as metadata rather
+        // than by reflecting over the runtime Antigen itself happens to be running on. Those two
+        // surfaces differ whenever CORE_ROOT is newer than Antigen's TargetFramework, which is the
+        // normal case in CI: APIs renamed since then get generated and fail at run time with
+        // MissingMethodException, and APIs added since then are never generated at all.
+        private static MetadataLoadContext s_metadataContext = null;
+        private static Assembly s_coreLib = null;
 
         /// <summary>
         ///     When false (the default), methods that reinterpret a floating-point element vector
@@ -147,7 +161,13 @@ namespace Antigen
             ];
         }
 
-        public static void RecordVectorMethods()
+        /// <summary>
+        ///     Build the method pool. When <paramref name="coreRootDirectory"/> is supplied, the
+        ///     pool is read from CORE_ROOT's assemblies (the framework the generated tests will
+        ///     actually execute against). When null, falls back to reflecting over Antigen's own
+        ///     runtime, which is the historical behavior.
+        /// </summary>
+        public static void RecordVectorMethods(string coreRootDirectory = null)
         {
             Debug.Assert(s_allVectorTypes == null);
             
@@ -156,52 +176,190 @@ namespace Antigen
                 return;
             }
 
+            InitializeMetadataContext(coreRootDirectory);
+
             RecordVectorTypes();
 
             s_allVectorMethods = new List<MethodSignature>();
 
-            RecordIntrinsicMethods(typeof(Vector));
-            RecordIntrinsicMethods(typeof(Vector2));
-            RecordIntrinsicMethods(typeof(Vector3));
-            RecordIntrinsicMethods(typeof(Vector4));
-            RecordVectorCtors(typeof(Vector2));
-            RecordVectorCtors(typeof(Vector3));
-            RecordVectorCtors(typeof(Vector4));
-            RecordIntrinsicMethods(typeof(Vector64));
-            RecordIntrinsicMethods(typeof(Vector128));
-            RecordIntrinsicMethods(typeof(Vector256));
-            RecordIntrinsicMethods(typeof(Vector512));
-            RecordIntrinsicMethods(typeof(AdvSimd));
-            RecordIntrinsicMethods(typeof(AdvSimd.Arm64), "AdvSimd.Arm64");
-            RecordIntrinsicMethods(typeof(Sve));
-            RecordIntrinsicMethods(typeof(System.Runtime.Intrinsics.X86.Aes));
-            RecordIntrinsicMethods(typeof(Bmi1));
-            RecordIntrinsicMethods(typeof(Bmi1.X64), "Bmi1.X64");
-            RecordIntrinsicMethods(typeof(Bmi2));
-            RecordIntrinsicMethods(typeof(Bmi2.X64), "Bmi2.X64");
-            RecordIntrinsicMethods(typeof(Fma));
-            RecordIntrinsicMethods(typeof(Lzcnt));
-            RecordIntrinsicMethods(typeof(Lzcnt.X64), "Lzcnt.X64");
-            RecordIntrinsicMethods(typeof(Pclmulqdq));
-            RecordIntrinsicMethods(typeof(Popcnt));
-            RecordIntrinsicMethods(typeof(Popcnt.X64), "Popcnt.X64");
-            RecordIntrinsicMethods(typeof(Avx));
-            RecordIntrinsicMethods(typeof(Avx2));
-            RecordIntrinsicMethods(typeof(Avx512BW));
-            RecordIntrinsicMethods(typeof(Avx512CD));
-            RecordIntrinsicMethods(typeof(Avx512DQ));
-            RecordIntrinsicMethods(typeof(Avx512F));
-            RecordIntrinsicMethods(typeof(Avx512Vbmi));
-            RecordIntrinsicMethods(typeof(Sse));
-            RecordIntrinsicMethods(typeof(Sse2));
-            RecordIntrinsicMethods(typeof(Sse3));
-            RecordIntrinsicMethods(typeof(Sse41));
-            RecordIntrinsicMethods(typeof(Sse42));
-            RecordIntrinsicMethods(typeof(Sse));
+            s_vectorGenericArgs = s_vectorGenericArgNames.Select(ResolveType).Where(t => t != null).ToList();
+            if (s_vectorGenericArgs.Count != s_vectorGenericArgNames.Length)
+            {
+                throw new InvalidOperationException(
+                    $"Could not resolve the primitive types used to instantiate generic vector methods. " +
+                    $"Resolved {s_vectorGenericArgs.Count} of {s_vectorGenericArgNames.Length}.");
+            }
+
+            RecordIntrinsicMethods("System.Numerics.Vector", "Vector");
+            RecordIntrinsicMethods("System.Numerics.Vector2", "Vector2");
+            RecordIntrinsicMethods("System.Numerics.Vector3", "Vector3");
+            RecordIntrinsicMethods("System.Numerics.Vector4", "Vector4");
+            RecordVectorCtors("System.Numerics.Vector2");
+            RecordVectorCtors("System.Numerics.Vector3");
+            RecordVectorCtors("System.Numerics.Vector4");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.Vector64", "Vector64");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.Vector128", "Vector128");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.Vector256", "Vector256");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.Vector512", "Vector512");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.Arm.AdvSimd", "AdvSimd");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.Arm.AdvSimd+Arm64", "AdvSimd.Arm64");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.Arm.Sve", "Sve");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Aes", "Aes");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Bmi1", "Bmi1");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Bmi1+X64", "Bmi1.X64");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Bmi2", "Bmi2");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Bmi2+X64", "Bmi2.X64");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Fma", "Fma");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Lzcnt", "Lzcnt");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Lzcnt+X64", "Lzcnt.X64");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Pclmulqdq", "Pclmulqdq");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Popcnt", "Popcnt");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Popcnt+X64", "Popcnt.X64");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Avx", "Avx");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Avx2", "Avx2");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Avx512BW", "Avx512BW");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Avx512CD", "Avx512CD");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Avx512DQ", "Avx512DQ");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Avx512F", "Avx512F");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Avx512Vbmi", "Avx512Vbmi");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Sse", "Sse");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Sse2", "Sse2");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Sse3", "Sse3");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Sse41", "Sse41");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Sse42", "Sse42");
+            RecordIntrinsicMethods("System.Runtime.Intrinsics.X86.Sse", "Sse");
         }
 
-        private static bool ShouldSkipVectorMethod(string fullMethodName)
+        /// <summary>
+        ///     Open CORE_ROOT for metadata-only inspection. Nothing here is ever executed, so the
+        ///     assemblies do not need to match the runtime Antigen is running on.
+        /// </summary>
+        private static void InitializeMetadataContext(string coreRootDirectory)
         {
+            if (string.IsNullOrEmpty(coreRootDirectory))
+            {
+                return;
+            }
+
+            string coreLibPath = Path.Combine(coreRootDirectory, "System.Private.CoreLib.dll");
+            if (!File.Exists(coreLibPath))
+            {
+                Console.WriteLine($"WARNING: {coreLibPath} not found; falling back to Antigen's own framework " +
+                                  $"for the method pool. Generated tests may use APIs that do not exist in CORE_ROOT.");
+                return;
+            }
+
+            s_metadataContext = new MetadataLoadContext(
+                new PathAssemblyResolver(Directory.GetFiles(coreRootDirectory, "*.dll")));
+            s_coreLib = s_metadataContext.LoadFromAssemblyPath(coreLibPath);
+        }
+
+        /// <summary>
+        ///     Resolve a type by full metadata name from CORE_ROOT when available, otherwise from
+        ///     Antigen's own runtime. Returns null when the type does not exist, which is expected:
+        ///     an intrinsic class may be absent from an older or newer framework.
+        /// </summary>
+        private static Type ResolveType(string fullName)
+        {
+            if (s_coreLib != null)
+            {
+                Type fromCoreLib = s_coreLib.GetType(fullName);
+                if (fromCoreLib != null)
+                {
+                    return fromCoreLib;
+                }
+
+                foreach (var assembly in s_metadataContext.GetAssemblies())
+                {
+                    Type candidate = assembly.GetType(fullName);
+                    if (candidate != null)
+                    {
+                        return candidate;
+                    }
+                }
+
+                return null;
+            }
+
+            return Type.GetType(fullName);
+        }
+
+        /// <summary>
+        ///     True if any parameter is passed by reference. Generated call sites never emit
+        ///     ref/out modifiers, so such methods cannot be used. This deliberately inspects the
+        ///     parameter types rather than the method's string form: <see cref="ShouldSkipVectorMethod"/>
+        ///     looks for "ByRef", which only appears in the runtime's MethodInfo.ToString() format
+        ///     and not in MetadataLoadContext's, which renders by-ref parameters as "T&amp;".
+        /// </summary>
+        private static bool HasByRefParameter(MethodInfo method)
+        {
+            foreach (var parameter in method.GetParameters())
+            {
+                if (parameter.ParameterType.IsByRef)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        ///     True if every generic argument of <paramref name="method"/> appears somewhere in its
+        ///     parameter list, and so can be inferred by the C# compiler at a call site that does not
+        ///     spell out type arguments.
+        /// </summary>
+        private static bool CanInferGenericArguments(MethodInfo method)
+        {
+            var genericArguments = method.GetGenericArguments();
+            var parameters = method.GetParameters();
+
+            foreach (var genericArgument in genericArguments)
+            {
+                bool found = false;
+                foreach (var parameter in parameters)
+                {
+                    if (MentionsType(parameter.ParameterType, genericArgument))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool MentionsType(Type type, Type sought)
+        {
+            if (type.IsGenericParameter)
+            {
+                return type.Name == sought.Name;
+            }
+
+            if (type.HasElementType)
+            {
+                return MentionsType(type.GetElementType(), sought);
+            }
+
+            if (type.IsGenericType)
+            {
+                foreach (var argument in type.GetGenericArguments())
+                {
+                    if (MentionsType(argument, sought))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ShouldSkipVectorMethod(string fullMethodName)        {
             // We do not support these types, so ignore these methods.
             return fullMethodName.Contains("IntPtr") || fullMethodName.Contains("ValueTuple") ||
                     fullMethodName.Contains("Matrix") || fullMethodName.Contains("Span") ||
@@ -261,15 +419,45 @@ namespace Antigen
         private static bool IsFloatingPointElementVector(Type type)
         {
             var elementType = VectorElementType(type);
-            return elementType == typeof(float) || elementType == typeof(double);
+            // Compared by name, not by typeof(): when the pool is built from CORE_ROOT metadata
+            // these Types come from a MetadataLoadContext, so reference equality against the
+            // runtime's typeof(float) is always false and this filter would silently stop working.
+            return elementType != null &&
+                   (elementType.FullName == "System.Single" || elementType.FullName == "System.Double");
         }
+
+        private static readonly HashSet<string> s_integralElementTypeNames = new HashSet<string>()
+        {
+            "System.Byte", "System.SByte", "System.Int16", "System.UInt16",
+            "System.Int32", "System.UInt32", "System.Int64", "System.UInt64",
+            "System.IntPtr", "System.UIntPtr"
+        };
 
         private static bool IsIntegralElementVector(Type type)
         {
             var elementType = VectorElementType(type);
-            return elementType != null && elementType.IsPrimitive &&
-                   elementType != typeof(float) && elementType != typeof(double) &&
-                   elementType != typeof(bool) && elementType != typeof(char);
+            return elementType != null && s_integralElementTypeNames.Contains(elementType.FullName);
+        }
+
+        private static void RecordIntrinsicMethods(string typeFullName, string vectorTypeName)
+        {
+            Type resolved = ResolveType(typeFullName);
+            if (resolved == null)
+            {
+                // Expected for intrinsic classes absent from this framework version.
+                return;
+            }
+
+            RecordIntrinsicMethods(resolved, vectorTypeName);
+        }
+
+        private static void RecordVectorCtors(string typeFullName)
+        {
+            Type resolved = ResolveType(typeFullName);
+            if (resolved != null)
+            {
+                RecordVectorCtors(resolved);
+            }
         }
 
         /// <summary>
@@ -297,7 +485,7 @@ namespace Antigen
                     continue;
                 }
 
-                if (ShouldSkipVectorMethod(fullMethodName))
+                if (ShouldSkipVectorMethod(fullMethodName) || HasByRefParameter(method))
                 {
                     continue;
                 }
@@ -329,8 +517,16 @@ namespace Antigen
 
                 string fullMethodName = method.ToString();
 
-                if (ShouldSkipVectorMethod(fullMethodName))
+                if (ShouldSkipVectorMethod(fullMethodName) || HasByRefParameter(method))
                 {
+                    continue;
+                }
+
+                if (!CanInferGenericArguments(method))
+                {
+                    // Calls are emitted without explicit type arguments, so a generic method whose
+                    // type argument appears only in the return type cannot be resolved by the C#
+                    // compiler. Skipping these avoids CS0411.
                     continue;
                 }
 
