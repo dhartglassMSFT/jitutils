@@ -35,46 +35,31 @@ namespace Antigen.Compilation
                 { "SYSLIB5003", ReportDiagnostic.Suppress }
             });
 
-        // Directory whose assemblies generated tests are compiled against. This must be
-        // CORE_ROOT, not Antigen's own directory: the tests execute under CORE_ROOT's corerun,
-        // so compiling against Antigen's (older, fixed at its TargetFramework) framework means
-        // APIs renamed since then compile fine but throw MissingMethodException at run time,
-        // and APIs added since then can never be generated at all. Falls back to Antigen's own
-        // framework if not set, which preserves the previous behavior.
-        private static string s_referenceDirectory = Path.GetDirectoryName(typeof(object).Assembly.Location);
-
-        private static readonly object s_referencesLock = new object();
-        private static MetadataReference[] s_references = null;
+        // Generated tests must compile against CORE_ROOT, not Antigen's own framework, because
+        // they execute under CORE_ROOT's corerun. Initialize to Antigen's framework to preserve
+        // the previous behavior for callers that do not configure a reference directory.
+        private static MetadataReference[] s_references =
+            CreateReferences(Path.GetDirectoryName(typeof(object).Assembly.Location) ??
+                throw new InvalidOperationException("Could not locate Antigen's framework directory."));
 
         /// <summary>
         ///     Point compilation at CORE_ROOT. Must be called before the first Compile().
         /// </summary>
         public static void SetReferenceDirectory(string referenceDirectory)
         {
-            lock (s_referencesLock)
-            {
-                s_referenceDirectory = referenceDirectory;
-                s_references = null;
-            }
+            s_references = CreateReferences(referenceDirectory);
         }
 
-        private static MetadataReference[] GetReferences()
+        private static MetadataReference[] CreateReferences(string referenceDirectory)
         {
-            lock (s_referencesLock)
+            return new MetadataReference[]
             {
-                if (s_references == null)
-                {
-                    s_references = new MetadataReference[]
-                    {
-                        MetadataReference.CreateFromFile(Path.Combine(s_referenceDirectory, "System.Private.CoreLib.dll")),
-                        MetadataReference.CreateFromFile(Path.Combine(s_referenceDirectory, "System.Console.dll")),
-                        MetadataReference.CreateFromFile(Path.Combine(s_referenceDirectory, "System.Runtime.dll")),
-                        MetadataReference.CreateFromFile(typeof(SyntaxTree).Assembly.Location),
-                        MetadataReference.CreateFromFile(typeof(CSharpSyntaxTree).Assembly.Location),
-                    };
-                }
-                return s_references;
-            }
+                MetadataReference.CreateFromFile(Path.Combine(referenceDirectory, "System.Private.CoreLib.dll")),
+                MetadataReference.CreateFromFile(Path.Combine(referenceDirectory, "System.Console.dll")),
+                MetadataReference.CreateFromFile(Path.Combine(referenceDirectory, "System.Runtime.dll")),
+                MetadataReference.CreateFromFile(typeof(SyntaxTree).Assembly.Location),
+                MetadataReference.CreateFromFile(typeof(CSharpSyntaxTree).Assembly.Location),
+            };
         }
 
         private readonly string m_outputDirectory;
@@ -98,7 +83,7 @@ namespace Antigen.Compilation
         private byte[] CompileAndGetBytes(SyntaxTree programTree, string assemblyName, CSharpCompilationOptions options)
         {
             string tag = options.OptimizationLevel == OptimizationLevel.Debug ? "Debug" : "Release";
-            var cc = CSharpCompilation.Create($"{assemblyName}-{tag}.exe", new SyntaxTree[] { programTree }, GetReferences(), options);
+            var cc = CSharpCompilation.Create($"{assemblyName}-{tag}.exe", new SyntaxTree[] { programTree }, s_references, options);
 
             using (var ms = new MemoryStream())
             {
